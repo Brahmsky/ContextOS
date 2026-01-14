@@ -1,0 +1,418 @@
+# 《ContextOS（AI Canvas）实施架构》
+
+> 当你看完这份文档文档：你将明确所有想法的哲学判断、设计转折与工程约束，拿到一份“拿到即可开工”的实施方案。本文以可审计的数据流、可映射的代码结构、可替换的模块接口为核心，确保系统具备可控复杂度与可持续迭代能力。
+
+------
+
+## 1. 设计哲学与约束（Philosophy & Constraints）
+
+### 1.1 我们究竟在解决什么问题
+
+对话中反复出现的失败模式并非“上下文不够长”，而是“单一线性输入形态 + 单次注意力分配”带来的结构性副作用：lost in the middle、复读而非学习、语境漂移、风格坍塌（模型在上下文异常时回退到训练分布的惯性写法）。这些现象在不同模型与不同窗口大小下都会以不同形式复现，因此把问题等同于“记忆系统”会导致投入与产出不匹配。
+
+由此我们明确系统定位：**ContextOS 不是 Memory OS，而是 Context Orchestration Layer（上下文编排层）**。核心能力不是“存更多”，而是**每次调用前对上下文进行预算、选择、排序、压缩，并用 View（认知运行态）控制模型的调用策略**。
+
+### 1.2 为什么选择 View + Recipe，而不是“随时切换 system prompt”
+
+“随时切换 system prompt”只能控制语言层约束（表达风格、角色口吻）。但对话中的痛点要求的是系统级控制：哪些上下文进入调用、以什么权重进入、哪些必须被排除、锚点如何保持原样、是否启用检索、是否允许写入长期记忆、如何软复位噪声等。这些属于**调用策略（runtime strategy）**，不是文本提示词能稳定表达的行为。
+
+因此采用 View 的原因是：**把“提示词”降级为 View 中的一个字段，把“上下文装配与运行策略”提升为结构化对象**。View 是对象，prompt 是字段；View 可继承、可冻结、可组合，prompt 不具备这些工程属性。
+
+### 1.3 为什么路由不在“输入时”完成，而在“调用前”完成
+
+对话明确指出短文本（“好的”“确实”“等等”）与过渡态思维具有天然歧义。强行在回车瞬间分类会引发碎片化、误归属与用户失控感。我们选择将 Routing 的主动作点从“输入归类”迁移到“调用装配”：输入先进入 Stream（事实日志），归属由 Context Planner 在调用前根据 View 策略与当前任务决定。这是对“无感 vs 可控”悖论的工程解法：默认无感（不逼用户分类），但提供 Recipe 面板与一键纠正（可控）。
+
+### 1.4 关键权衡（Trade-offs）
+
+我们显式接受以下权衡：
+
+- 放弃“100% 自动正确路由”的幻想，换取“错误可见、可修、可学习”的闭环。
+- 放弃把一切变成永久记忆，换取“锚点 + 中期聚合”的稳定可控上下文。
+- 放弃 V1 就做流体拓扑自动排布，换取“先做 Recipe 与 View 的稳定性底座”。
+
+------
+
+## 2. 分层模型与职责（Layered Model）
+
+### 2.1 分层定义
+
+系统分为 6 层，每层职责单一，跨层通过接口通信：
+
+1. **Interface Layer（UI/HTTP）**
+   负责输入、展示画布、展示 Recipe、接收用户纠正操作。不包含业务决策。
+2. **Orchestration Layer（Context Orchestrator）**
+   系统中枢。负责选择 View、生成 Recipe、调度 Context Planner、调度 Runtime Policy、执行 LLM 调用。Orchestrator 不直接做检索、不直接做存储细节。
+3. **Logic Engine Layer（Planner & Estimators）**
+   包含 Intent/Mode Estimator、Context Planner、Writeback Controller、Drift Detector 等算法模块。它们只输出结构化决策，不直接发起 LLM 调用（避免耦合）。
+4. **Domain Services Layer（Islands/Memory/RAG）**
+   提供上下文素材与写入能力：Stream、Islands、Anchors、Memory、RAG。对外以接口暴露“取哪些材料/写哪些材料”，不参与 Orchestrator 的策略判断。
+5. **Adapters Layer（Model & Tools Adapters）**
+   对接不同 LLM / Embedding / VectorDB / Search 等，统一协议。上层不感知供应商差异。
+6. **Data Layer（Persistence）**
+   PostgreSQL（结构化元数据 + JSONB）、Vector DB（召回）、Object Store（可选：大文本快照/附件）。
+
+### 2.2 目录结构（Folder Structure）与代码映射
+
+建议采用 Monorepo。目录结构如下：
+
+```text
+contextos/
+  docs/
+    whitepaper.md
+    view-schema.md
+    recipe-spec.md
+    islands-spec.md
+    planner-spec.md
+    testing-spec.md
+
+  apps/
+    web/                       # 桌面端 UI（Canvas + Recipe Panel）
+    mobile/                    # 移动端 UI（输入优先 + 抽屉画布）
+
+  services/
+    api-gateway/               # HTTP/GraphQL，鉴权，限流，转发到 orchestrator
+    orchestrator/              # Orchestration Layer
+      src/
+        orchestrator.ts        # 主入口：handleTurn()
+        recipe.ts              # Recipe 结构与生成器
+        policies/              # 运行时策略编排（KV、safety、tools）
+        contracts/             # 纯接口定义（跨层协议）
+
+    logic-engine/              # Planner & Estimators
+      src/
+        estimator/             # Intent & Mode Estimator
+        planner/               # Context Planner（预算/排序/压缩策略）
+        drift/                 # 漂移检测（island drift metrics）
+        writeback/             # 写回控制（island更新、memory写入规则）
+        superposition/         # 叠加态缓冲（短句 pending）
+
+    domain-services/
+      src/
+        stream/                # 输入流读写
+        islands/               # 岛屿聚合/合并/分裂的服务接口
+        anchors/               # 锚点管理
+        memory/                # 长期偏好/项目记忆（读写受策略控制）
+        rag/                   # 检索服务（可选）
+        provenance/            # 溯源记录（段落->来源）
+
+    adapters/
+      llm/                     # 多模型适配器（OpenAI/Claude/Local）
+      embedding/               # embedding 适配器
+      vector-db/               # Milvus/Pinecone/pgvector 等
+      search/                  # 外部检索/索引适配（可选）
+      telemetry/               # 日志/指标/追踪
+
+  packages/
+    shared-types/              # TypeScript types / JSON schema typings
+    utils/                     # 通用工具（token计数、hash、time）
+
+  infra/
+    migrations/                # DB schema migrations
+    docker/                    # 本地开发环境
+    deploy/                    # 部署脚本与配置
+```
+
+每个目录的边界清晰：UI 不触碰策略；Orchestrator 只编排；Logic Engine 输出决策；Domain Services 提供材料；Adapters 屏蔽供应商差异；Data Layer 只存取。
+
+------
+
+## 3. 核心实体与数据流（Data Flow & Entities）
+
+### 3.1 关键实体（Classes / Interfaces）
+
+以下为核心接口定义（语言无关，以伪接口表达）：
+
+- `ViewDefinition`：版本化的 View 策略对象（基于 JSON Schema）
+- `ViewRuntimeState`：运行时状态（active/frozen/last_used）
+- `Recipe`：一次调用的上下文配方（透明度核心）
+- `ContextItem`：候选上下文条目（来自 stream/island/memory/rag/pins）
+- `Island`：语境岛屿（聚合单元，含 centroid、summary、anchors、drift）
+- `Anchor`：稳定锚点（事实/约束/决定/风格）
+- `ModelCallPlan`：模型调用计划（model_id、temperature、messages、tools、kv_policy）
+- `ProvenanceMap`：输出段落到输入条目的映射
+
+关键服务接口：
+
+- `IIntentEstimator`：输入 -> (view candidates, island candidates, confidence, ambiguity)
+- `IContextPlanner`：候选条目 + view policy -> 选中条目 + 顺序 + 压缩产物
+- `IIslandService`：query / update / merge / split-suggest
+- `IMemoryService`：read(scope, rules) / write(items, rules)
+- `IRagService`：retrieve(query, domain, top_k)
+- `ILLMAdapter`：execute(model_call_plan) -> completion
+- `IWritebackController`：根据策略写回 island/memory，并记录纠错样本
+
+### 3.2 核心请求的流转（输入 -> 处理 -> 输出）
+
+以一次用户输入为例：
+
+[UI] 提交 `user_message` 与可选 overrides（用户手动选择 view/islands/排除项）。
+[API] 转交给 Orchestrator。
+[Orchestrator] 调用 Estimator 获得候选 view/islands 与置信度。
+[Orchestrator] 在 manual/assist/auto 策略下确定最终 View 集合。
+[Orchestrator] 触发 Context Planner：从 Stream、Islands、Anchors、Memory、RAG 拉取候选材料，按预算与权重选择、排序、压缩，并插入 anchors。
+[Orchestrator] 应用 Runtime Policy（kv freeze/reset、safety、tools）。
+[Orchestrator] 组装 Prompt（结构化 sections + user message），通过 LLM Adapter 调用模型。
+[Post] 格式化输出，生成 Provenance（至少 Recipe 级别；可选段落级）。
+[Writeback] 更新 island 活跃度、漂移指标，按策略写入 memory（默认关闭），记录用户纠错用于路由学习。
+[UI] 渲染回答 + Recipe 面板（可见、可改），提供 reroute/pin/exclude 操作入口。
+
+------
+
+## 4. 逻辑伪代码（Implementation Logic）
+
+本系统最核心的逻辑环节是 **Orchestrator 生成 Recipe 并调用模型**。它体现了“View 不是 prompt”这一哲学如何落地，也体现了“路由在调用前完成”这一约束如何执行。
+
+下面给出高质量伪代码，供开发者直接对照实现。
+
+```pseudo
+// ====== Core Types ======
+type TurnRequest {
+  userId: string
+  threadId: string
+  message: string
+  overrides?: {
+    viewId?: string
+    islandIdsInclude?: list<string>
+    islandIdsExclude?: list<string>
+    weightsOverride?: map<string, number>     // e.g. {"islands":0.6,"stream":0.3}
+    pinAnchors?: list<string>                  // raw anchor text or anchor ids
+    disableRag?: bool
+    kvPolicyOverride?: "default"|"freeze"|"reset_soft"|"reset_hard"
+  }
+}
+
+type TurnResponse {
+  assistantMessage: string
+  recipe: Recipe
+  provenance?: ProvenanceMap
+  suggestedActions?: list<ActionSuggestion>    // split/merge/anchor suggestion
+}
+
+// ====== Orchestrator Entry ======
+function handleTurn(req: TurnRequest): TurnResponse
+  // 0) Persist raw input into Stream (fact log)
+  msgId = StreamService.append(req.userId, req.threadId, role="user", content=req.message)
+
+  // 1) Load session state: active view, last used islands, user pins
+  session = SessionService.load(req.userId, req.threadId)
+  activeView = ViewService.getActiveView(session) or ViewService.getDefaultView()
+
+  // 2) Estimate intent/mode unless user overrides view
+  if req.overrides.viewId exists:
+      selectedViews = [ViewService.getView(req.overrides.viewId)]
+      estimatorOut = null
+  else:
+      estimatorOut = IntentEstimator.suggest(
+        userMessage=req.message,
+        recentStream=StreamService.window(req.threadId, recentTurns=activeView.policy.context.selection.windowing.recent_turns),
+        recentIslands=IslandService.recent(session, limit=12),
+        activeView=activeView
+      )
+      selectedViews = ViewSelector.pick(estimatorOut, activeView, mode=activeView.policy.runtime.routing.mode)
+
+  // 3) Build candidate context pool from multiple sources
+  // 3.1 anchors: global + view + island scoped
+  anchors = AnchorService.collect(
+    userId=req.userId,
+    viewIds=map(selectedViews, v => v.id),
+    islandIds=req.overrides.islandIdsInclude or estimatorOut.suggestedIslandsTopK
+  )
+  if req.overrides.pinAnchors exists:
+      anchors = anchors + AnchorService.upsertPinned(req.userId, req.overrides.pinAnchors)
+
+  // 3.2 stream candidates
+  streamRecent = StreamService.window(req.threadId, recentTurns=policyWindow(selectedViews).recent_turns)
+  streamMiddle = StreamService.window(req.threadId, middleTurns=policyWindow(selectedViews).middle_turns)
+
+  // 3.3 island candidates (semantic clusters)
+  islandCandidates = IslandService.selectCandidates(
+    userId=req.userId,
+    suggested=estimatorOut?.suggestedIslandsTopK,
+    include=req.overrides.islandIdsInclude,
+    exclude=req.overrides.islandIdsExclude
+  )
+
+  // 3.4 memory read (policy-gated)
+  memoryItems = []
+  if MemoryPolicy.allowRead(selectedViews):
+      memoryItems = MemoryService.read(
+        userId=req.userId,
+        scopes=policyMemoryScopes(selectedViews),
+        maxItems=policyMemoryMax(selectedViews)
+      )
+
+  // 3.5 optional RAG (policy-gated + override)
+  ragItems = []
+  if ToolPolicy.allowRag(selectedViews) and not req.overrides.disableRag:
+      ragItems = RagService.retrieve(
+        query=req.message,
+        domains=policyRagDomains(selectedViews),
+        topK=policyRagTopK(selectedViews)
+      )
+
+  candidates = ContextPool(
+    anchors=anchors,
+    streamRecent=streamRecent,
+    streamMiddle=streamMiddle,
+    islands=islandCandidates,
+    memory=memoryItems,
+    rag=ragItems
+  )
+
+  // 4) Plan context with budgets, weights, ordering, compression
+  plannerInput = {
+    userMessage: req.message,
+    selectedViews: selectedViews,
+    candidates: candidates,
+    weightsOverride: req.overrides.weightsOverride
+  }
+
+  plan = ContextPlanner.plan(plannerInput)
+  // plan contains:
+  // - selectedContextSections (ordered)
+  // - compressedSummaries
+  // - tokenUsage report
+  // - stableAnchors (verbatim kept)
+
+  // 5) Decide runtime policy (KV + safety) with optional overrides
+  runtime = RuntimeController.resolve(
+    views=selectedViews,
+    kvOverride=req.overrides.kvPolicyOverride
+  )
+
+  // 6) Assemble model call plan (structured prompt)
+  prompt = PromptAssembler.build(
+    views=selectedViews,
+    anchors=plan.stableAnchors,
+    sections=plan.selectedContextSections,
+    userMessage=req.message,
+    outputContract=OutputContract.fromViews(selectedViews)
+  )
+
+  modelPlan = ModelCallPlan(
+    modelId = ModelRouter.pick(views=selectedViews),
+    messages = prompt.messages,
+    tools = ToolRouter.pick(views=selectedViews, runtime=runtime),
+    temperature = TemperaturePolicy.fromViews(selectedViews),
+    kvPolicy = runtime.kvPolicy,
+    safety = runtime.safety
+  )
+
+  // 7) Execute LLM call
+  completion = LLMAdapter.execute(modelPlan)
+
+  // 8) Post-process (format, optional self-check)
+  finalText = PostProcessor.process(
+    text=completion.text,
+    views=selectedViews,
+    selfCheck=ReasoningPolicy.selfCheck(selectedViews)
+  )
+
+  // 9) Build recipe + provenance for transparency
+  recipe = RecipeBuilder.build(
+    request=req,
+    views=selectedViews,
+    estimatorOut=estimatorOut,
+    contextPlan=plan,
+    runtime=runtime,
+    modelPlan=modelPlan
+  )
+
+  provenance = ProvenanceBuilder.maybeBuild(
+    enabled=TelemetryPolicy.recordProvenance(selectedViews),
+    recipe=recipe,
+    modelOutput=finalText,
+    contextPlan=plan
+  )
+
+  // 10) Persist assistant output + writeback with policy gating
+  StreamService.append(req.userId, req.threadId, role="assistant", content=finalText)
+
+  WritebackController.apply(
+    userId=req.userId,
+    threadId=req.threadId,
+    views=selectedViews,
+    recipe=recipe,
+    userMessageId=msgId,
+    assistantText=finalText,
+    candidates=candidates,
+    contextPlan=plan
+  )
+
+  // 11) Suggestions (drift split/merge, anchor suggestion)
+  suggestions = DriftService.suggestActions(islandCandidates, plan, estimatorOut)
+
+  return TurnResponse(
+    assistantMessage=finalText,
+    recipe=recipe,
+    provenance=provenance,
+    suggestedActions=suggestions
+  )
+end
+```
+
+该伪代码体现了核心抽象如何落地：Estimator 只提供候选与置信；Selector 决定 view；Planner 决定“喂什么”；Runtime 决定“怎么喂”；Recipe 永远被生成并回传；Writeback 永远策略受控且可审计。
+
+------
+
+## 5. 模块解耦与扩展性（Decoupling）
+
+### 5.1 最可能变化的点与对应 Hook 设计
+
+变化点一：模型供应商与能力差异
+不同 LLM 支持的工具调用、上下文长度、KV 行为不同。我们不在业务层写供应商逻辑，而通过 `ILLMAdapter` 与 `ModelRouter` 解耦。新增模型仅需实现 Adapter 与能力描述（capabilities），不改 Orchestrator。
+
+变化点二：路由与估计策略从规则到模型
+V1 可用 embedding+规则，V2 可能引入小模型或 LLM 轻调用。Hook：`IIntentEstimator` 接口保持稳定；Estimator 输出结构化候选，不直接驱动上下文装配。
+
+变化点三：Context Planner 的预算与排序算法
+这是对抗 lost-in-the-middle 的核心，必然会迭代。Hook：`IContextPlanner.plan()` 输入输出固定为候选池与计划结构。Planner 版本化（plannerVersion），Recipe 中记录版本，用于回归与对比。
+
+变化点四：Islands 的聚合、分裂、漂移检测
+漂移指标与聚类算法必然调整。Hook：`IIslandService.selectCandidates()` 与 `DriftService.suggestActions()`；岛屿内部指标可扩展，外部接口稳定。
+
+变化点五：透明度粒度从 Recipe 级到段落级 Provenance
+初期仅返回 Recipe；后期扩展 ProvenanceMap。Hook：`ProvenanceBuilder.maybeBuild()`；UI 只依赖 presence/absence，不依赖内部实现。
+
+### 5.2 防止耦合的具体手段（拒绝空话）
+
+- Orchestrator 无状态化：除 session 引用外不保存长期状态；所有决策可由 Recipe 复现。
+- 采用“结构化中间产物”：Estimator 输出、ContextPlan、RuntimePlan、Recipe 作为跨层契约，避免隐式共享。
+- 所有写回经过 WritebackController：禁止在 IslandsService/MemoryService 内部隐式写入。
+- ViewDefinition 版本化：变更策略必须升级版本号；Recipe 记录 view version，方便回放与回归。
+
+------
+
+## 附：组件对应关系（便于团队分工）
+
+使用 [ ] 展示职责对应：
+
+[UI Canvas] 负责：展示 View 卡片、岛屿节点、Recipe 面板、纠正操作入口
+[API Gateway] 负责：鉴权、会话、请求转发、限流、日志关联 request_id
+[Context Orchestrator] 负责：handleTurn、生成 Recipe、调度各服务
+[Intent Estimator] 负责：候选 view/island + 置信度，不做最终决策
+[Context Planner] 负责：预算、选择、排序、压缩、锚点插入
+[Runtime Controller] 负责：kv/safety/tools 的策略解析
+[LLM Adapter] 负责：供应商差异隔离
+[Writeback Controller] 负责：岛屿更新、记忆写入、纠错样本记录（策略受控）
+[Telemetry/Provenance] 负责：recipe/provenance 的落库与查询
+
+------
+
+## 收尾：开工前的落地清单（最小闭环）
+
+为了保证“拿到即可开工”，建议首个迭代把闭环锁定在以下可验收项上：
+
+- 能创建/加载 ViewDefinition（按 schema 验证、版本化存储）
+- 每次 turn 都生成 Recipe（含 view、来源权重、选中条目、预算报告）
+- Anchors 可 pin，并在 Planner 中获得最低保障注入
+- Islands 支持候选召回与 summary 提供（先不做自动分裂/合并）
+- Orchestrator 按上述伪代码跑通：输入 -> 计划 -> 调用 -> 回写
+- UI 能展示 Recipe 并支持最少两种纠正：切换 view、排除 island
+
+完成这一步时，你已经拥有了与“切换 system prompt”本质不同的系统：它不是让模型“记住更多”，而是让系统“决定让模型看到什么，并把决策暴露出来可被修正”。
+
+如果你希望我把白皮书进一步“落到任务卡级别”，下一步我可以补两份附录，直接对接开发排期：
+
+- 默认 View 套件（8 个）全量 JSON 实例（可直接入库）
+- Context Planner 的预算分配与排序规则详细规范（含 token 计数策略与边界条件）
