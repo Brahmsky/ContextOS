@@ -1,0 +1,154 @@
+{
+  "views": [
+    {
+      "id": "debug",
+      "version": "1.0.0",
+      "label": "Debug",
+      "description": "Focused debugging mode with strict constraints.",
+      "prompt": "You are in debug mode. Provide precise, step-by-step diagnostics and fixes.",
+      "policy": {
+        "context": {
+          "maxTokens": 1200,
+          "weights": {
+            "anchors": 0.25,
+            "stream": 0.35,
+            "islands": 0.25,
+            "memory": 0.1,
+            "rag": 0.05
+          }
+        },
+        "runtime": {
+          "temperature": 0.2,
+          "allowTools": true,
+          "allowRag": false,
+          "allowMemoryWrite": false
+        }
+      }
+    },
+    {
+      "id": "explore",
+      "version": "1.0.0",
+      "label": "Explore",
+      "description": "Idea exploration and discovery.",
+      "prompt": "You are in exploration mode. Generate diverse ideas before narrowing.",
+      "policy": {
+        "context": {
+          "maxTokens": 1400,
+          "weights": {
+            "anchors": 0.15,
+            "stream": 0.35,
+            "islands": 0.3,
+            "memory": 0.1,
+            "rag": 0.1
+          }
+        },
+        "runtime": {
+          "temperature": 0.7,
+          "allowTools": true,
+          "allowRag": true,
+          "allowMemoryWrite": true
+        }
+      }
+    },
+    {
+      "id": "critic",
+      "version": "1.0.0",
+      "label": "Critic",
+      "description": "Critical review and risk assessment.",
+      "prompt": "You are in critic mode. Highlight risks, constraints, and counterpoints.",
+      "policy": {
+        "context": {
+          "maxTokens": 1200,
+          "weights": {
+            "anchors": 0.3,
+            "stream": 0.3,
+            "islands": 0.2,
+            "memory": 0.1,
+            "rag": 0.1
+          }
+        },
+        "runtime": {
+          "temperature": 0.3,
+          "allowTools": true,
+          "allowRag": true,
+          "allowMemoryWrite": false
+        }
+      }
+    },
+    {
+      "id": "plan",
+      "version": "1.0.0",
+      "label": "Plan",
+      "description": "Execution planning and milestone breakdown.",
+      "prompt": "You are in planning mode. Provide structured plans with milestones and dependencies.",
+      "policy": {
+        "context": {
+          "maxTokens": 1300,
+          "weights": {
+            "anchors": 0.2,
+            "stream": 0.3,
+            "islands": 0.25,
+            "memory": 0.15,
+            "rag": 0.1
+          }
+        },
+        "runtime": {
+          "temperature": 0.4,
+          "allowTools": true,
+          "allowRag": true,
+          "allowMemoryWrite": true
+        }
+      }
+    },
+    {
+      "id": "summarize",
+      "version": "1.0.0",
+      "label": "Summarize",
+      "description": "Concise summarization and synthesis.",
+      "prompt": "You are in summarize mode. Provide concise summaries and key points.",
+      "policy": {
+        "context": {
+          "maxTokens": 1000,
+          "weights": {
+            "anchors": 0.2,
+            "stream": 0.4,
+            "islands": 0.2,
+            "memory": 0.1,
+            "rag": 0.1
+          }
+        },
+        "runtime": {
+          "temperature": 0.2,
+          "allowTools": false,
+          "allowRag": true,
+          "allowMemoryWrite": false
+        }
+      }
+    },
+    {
+      "id": "persona",
+      "version": "1.0.0",
+      "label": "Persona",
+      "description": "Style and voice alignment.",
+      "prompt": "You are in persona mode. Maintain the desired tone and style consistently.",
+      "policy": {
+        "context": {
+          "maxTokens": 1100,
+          "weights": {
+            "anchors": 0.25,
+            "stream": 0.3,
+            "islands": 0.2,
+            "memory": 0.15,
+            "rag": 0.1
+          }
+        },
+        "runtime": {
+          "temperature": 0.5,
+          "allowTools": false,
+          "allowRag": false,
+          "allowMemoryWrite": true
+        }
+      }
+    }
+  ]
+}
