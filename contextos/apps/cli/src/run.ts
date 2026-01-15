@@ -13,7 +13,6 @@ import { diffRecipes } from "../../../packages/shared-types/src/diff.js";
 import { writeJsonFile } from "../../../packages/utils/src/files.js";
 import { appendStore } from "../../../data-layer/src/jsonStore.js";
 import { detectDrift } from "../../../services/logic-engine/drift/driftDetector.js";
-import type { StrategyVariant } from "../../../packages/shared-types/src/comparison.js";
 import { readStoreById } from "../../../data-layer/src/jsonStore.js";
 import { runRegression } from "../../../services/logic-engine/regression/regressionRunner.js";
 import { hashJson } from "../../../packages/utils/src/hash.js";
@@ -22,6 +21,11 @@ import { AdoptionService } from "../../../services/policy/adoptionService.js";
 import { PolicyApplier } from "../../../services/policy/policyApplier.js";
 import { RollbackService } from "../../../services/policy/rollbackService.js";
 import type { StrategyKey } from "../../../packages/shared-types/src/strategyMetrics.js";
+import { GovernanceAnalyzer } from "../../../services/governance/governanceAnalyzer.js";
+import { GovernancePolicyService } from "../../../services/governance/governancePolicy.js";
+import { ExperimentService } from "../../../services/experiments/experimentService.js";
+import { ExperimentRunner } from "../../../services/experiments/experimentRunner.js";
+import type { StrategyVariant } from "../../../packages/shared-types/src/comparison.js";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -43,6 +47,10 @@ const parseArgs = (input: string[]) => {
     excludeIslands: string[];
     timeline?: boolean;
     variants?: string;
+    description?: string;
+    views?: string;
+    isolation?: string;
+    confirm?: boolean;
   } = { excludeIslands: [] };
   for (let i = 0; i < input.length; i += 1) {
     const arg = input[i];
@@ -71,6 +79,25 @@ const parseArgs = (input: string[]) => {
     if (arg === "--variants") {
       options.variants = input[i + 1];
       i += 1;
+      continue;
+    }
+    if (arg === "--description") {
+      options.description = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--views") {
+      options.views = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--isolation") {
+      options.isolation = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--confirm") {
+      options.confirm = true;
     }
   }
   return options;
@@ -228,6 +255,7 @@ if (command === "recommend") {
 }
 
 if (command === "adopt") {
+  const options = parseArgs(args);
   const recommendationId = args[1];
   const strategyArg = args[2];
   const decision = args[3];
@@ -291,7 +319,8 @@ if (command === "adopt") {
     decision: decision as "accept" | "reject" | "defer",
     decidedBy: actor,
     rationale,
-    appliedChanges
+    appliedChanges,
+    confirm: options.confirm
   });
   await adoptionService.recordTimeline({
     adoptionId: adoption.adoptionId,
@@ -323,6 +352,99 @@ if (command === "rollback") {
   console.log(`- adoptionId: ${rollbackAdoption.adoptionId}`);
   console.log(`- rollbackOf: ${rollbackAdoption.rollbackRef}`);
   process.exit(0);
+}
+
+if (command === "governance") {
+  const subcommand = args[1];
+  const options = parseArgs(args);
+  const policyService = new GovernancePolicyService(rootDir);
+  if (subcommand === "set") {
+    const policy = {
+      maxRollbacksPerWindow: Number(args[2] ?? 3),
+      minRunsBeforeAdoption: Number(args[3] ?? 3),
+      restrictedScopes: ["global"],
+      experimentOnlyScopes: ["planner"]
+    };
+    await policyService.savePolicy(policy);
+    console.log("Governance Policy Saved");
+    process.exit(0);
+  }
+  if (subcommand === "report") {
+    const analyzer = new GovernanceAnalyzer(rootDir);
+    const strategyMetrics = await new OfflineAnalyzer(rootDir).computeStrategyMetrics();
+    const report = await analyzer.analyze({ timeWindowDays: 30, strategyMetrics });
+    await writeJsonFile(`${rootDir}/data/governance_reports/governance-report.json`, report);
+    await appendStore(rootDir, "governance_reports", report);
+    console.log("Governance Report Summary");
+    console.log(`- total adoptions: ${report.adoptionSummary.totalAdoptions}`);
+    console.log(`- rollbacks: ${report.rollbackSummary.totalRollbacks}`);
+    process.exit(0);
+  }
+  throw new Error("Usage: governance <report|set>");
+}
+
+if (command === "experiment") {
+  const subcommand = args[1];
+  const options = parseArgs(args);
+  const experimentService = new ExperimentService(rootDir);
+  if (subcommand === "create") {
+    if (!options.description || !options.views || !options.isolation) {
+      throw new Error("Usage: experiment create --description \"...\" --views viewA,viewB --isolation sandbox");
+    }
+    const experiment = await experimentService.createExperiment({
+      description: options.description,
+      involvedViews: options.views.split(",").map((view) => view.trim()),
+      isolationLevel: options.isolation as "sandbox" | "shadow" | "report-only"
+    });
+    console.log("Experiment Created");
+    console.log(`- id: ${experiment.experimentId}`);
+    process.exit(0);
+  }
+  if (subcommand === "run") {
+    const experimentId = args[2];
+    if (!experimentId || !options.message) {
+      throw new Error("Usage: experiment run <experiment_id> --message \"...\"");
+    }
+    const experiment = await experimentService.getExperiment(experimentId);
+    if (!experiment) {
+      throw new Error("Experiment not found.");
+    }
+    const viewsList = experiment.involvedViews;
+    const variants: StrategyVariant[] = viewsList.map((viewId) => ({
+      plannerVariantId: "v1",
+      viewVariantId: viewId,
+      description: `experiment:${experimentId}:${viewId}`
+    }));
+    const runner = new ExperimentRunner(rootDir, new ContextPlanner());
+    const { report, comparison } = await runner.run({
+      experiment,
+      message: options.message,
+      variants
+    });
+    await experimentService.recordReport(report);
+    await writeJsonFile(
+      `${rootDir}/data/experiment_reports/experiment-${experimentId}-comparison.json`,
+      comparison
+    );
+    console.log("Experiment Run Summary");
+    console.log(`- comparisons: ${report.summary.comparisons}`);
+    process.exit(0);
+  }
+  if (subcommand === "report") {
+    const experimentId = args[2];
+    if (!experimentId) {
+      throw new Error("Usage: experiment report <experiment_id>");
+    }
+    const report = await readStoreById(rootDir, "experiment_reports", experimentId);
+    if (!report) {
+      throw new Error("Experiment report not found.");
+    }
+    console.log("Experiment Report Summary");
+    const summary = report as { summary?: { comparisons?: number } };
+    console.log(`- comparisons: ${summary.summary?.comparisons ?? 0}`);
+    process.exit(0);
+  }
+  throw new Error("Usage: experiment <create|run|report>");
 }
 
 if (command === "timeline") {

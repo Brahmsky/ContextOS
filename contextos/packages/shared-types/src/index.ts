@@ -9,3 +9,5 @@ export * from "./regression.js";
 export * from "./strategyMetrics.js";
 export * from "./recommendations.js";
 export * from "./adoption.js";
+export * from "./governance.js";
+export * from "./experiments.js";
