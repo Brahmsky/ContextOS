@@ -4,6 +4,14 @@ export type TurnRequest = {
   userId: string;
   threadId: string;
   message: string;
+  requestId?: string;
+  revision?: number;
+  parentRecipeId?: string;
+  overrides?: {
+    viewId?: string;
+    excludeIslands?: string[];
+    weightsOverride?: Record<string, number>;
+  };
 };
 
 export type TurnResponse = {

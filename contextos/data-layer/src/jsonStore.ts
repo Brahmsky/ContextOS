@@ -3,12 +3,28 @@ import { readJsonFile, writeJsonFile } from "../../packages/utils/src/files.js";
 
 export type JsonRecord = Record<string, unknown>;
 
-export type StoreFile = "stream" | "islands" | "anchors" | "recipes" | "views";
+export type StoreFile =
+  | "stream"
+  | "islands"
+  | "anchors"
+  | "recipes"
+  | "views"
+  | "context_plans"
+  | "recipe_diffs";
 
 const storePath = (rootDir: string, name: StoreFile) => `${rootDir}/data/${name}/${name}.json`;
 
 export async function readStore(rootDir: string, name: StoreFile): Promise<JsonRecord[]> {
   return readJsonFile(storePath(rootDir, name), [] as JsonRecord[]);
+}
+
+export async function readStoreById(
+  rootDir: string,
+  name: StoreFile,
+  id: string
+): Promise<JsonRecord | undefined> {
+  const records = await readStore(rootDir, name);
+  return records.find((record) => record.id === id || record.planId === id);
 }
 
 export async function writeStore(rootDir: string, name: StoreFile, records: JsonRecord[]): Promise<void> {

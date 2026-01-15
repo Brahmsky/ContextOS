@@ -4,6 +4,7 @@ import type {
   Island,
   ModelCallPlan,
   Recipe,
+  ContextPlan,
   ViewDefinition,
 } from "./types.js";
 
@@ -77,16 +78,43 @@ export const contextItemSchema: JsonSchema = {
   additionalProperties: false
 };
 
-export const islandSchema: JsonSchema = {
+export const droppedItemSchema: JsonSchema = {
   type: "object",
-  required: ["id", "title", "summary", "anchors", "driftScore", "updatedAt"],
+  required: ["id", "type", "source", "dropReason"],
   properties: {
     id: { type: "string" },
-    title: { type: "string" },
-    summary: { type: "string" },
-    anchors: { type: "array", items: { type: "string" } },
-    driftScore: { type: "number" },
-    updatedAt: { type: "string" }
+    type: { type: "string" },
+    source: { type: "string" },
+    score: { type: "number" },
+    dropReason: { type: "string" },
+    reasonNotes: { type: "array", items: { type: "string" } }
+  },
+  additionalProperties: false
+};
+
+export const tokenReportSchema: JsonSchema = {
+  type: "object",
+  required: ["budgetTotal", "usedTotal", "byBucket"],
+  properties: {
+    budgetTotal: { type: "number" },
+    usedTotal: { type: "number" },
+    byBucket: {
+      type: "object",
+      properties: {}
+    }
+  },
+  additionalProperties: true
+};
+
+export const contextSectionSchema: JsonSchema = {
+  type: "object",
+  required: ["id", "label", "items", "tokenEstimate", "budget"],
+  properties: {
+    id: { type: "string" },
+    label: { type: "string" },
+    items: { type: "array", items: contextItemSchema },
+    tokenEstimate: { type: "number" },
+    budget: { type: "number" }
   },
   additionalProperties: false
 };
@@ -99,6 +127,53 @@ export const anchorSchema: JsonSchema = {
     label: { type: "string" },
     content: { type: "string" },
     scope: { type: "string" },
+    updatedAt: { type: "string" }
+  },
+  additionalProperties: false
+};
+
+export const contextPlanSchema: JsonSchema = {
+  type: "object",
+  required: [
+    "planId",
+    "requestId",
+    "plannerVersion",
+    "selectedSections",
+    "stableAnchors",
+    "tokenReport",
+    "droppedItems",
+    "inputsSnapshot"
+  ],
+  properties: {
+    planId: { type: "string" },
+    requestId: { type: "string" },
+    plannerVersion: { type: "string" },
+    selectedSections: { type: "array", items: contextSectionSchema },
+    stableAnchors: { type: "array", items: anchorSchema },
+    tokenReport: tokenReportSchema,
+    droppedItems: { type: "array", items: droppedItemSchema },
+    inputsSnapshot: {
+      type: "object",
+      required: ["candidateCounts", "weights", "window", "thresholds"],
+      properties: {
+        candidateCounts: { type: "object" },
+        weights: { type: "object" },
+        window: { type: "object" },
+        thresholds: { type: "object" }
+      }
+    }
+  },
+  additionalProperties: false
+};
+export const islandSchema: JsonSchema = {
+  type: "object",
+  required: ["id", "title", "summary", "anchors", "driftScore", "updatedAt"],
+  properties: {
+    id: { type: "string" },
+    title: { type: "string" },
+    summary: { type: "string" },
+    anchors: { type: "array", items: { type: "string" } },
+    driftScore: { type: "number" },
     updatedAt: { type: "string" }
   },
   additionalProperties: false
@@ -131,12 +206,44 @@ export const modelCallPlanSchema: JsonSchema = {
 
 export const recipeSchema: JsonSchema = {
   type: "object",
-  required: ["id", "timestamp", "viewId", "viewVersion", "selectedContext", "tokenUsage", "modelPlan", "decisions"],
+  required: [
+    "id",
+    "requestId",
+    "revision",
+    "timestamp",
+    "viewId",
+    "viewVersion",
+    "viewWeights",
+    "plannerVersion",
+    "contextPlanId",
+    "runtimePolicy",
+    "selectedContext",
+    "tokenUsage",
+    "modelPlan",
+    "decisions"
+  ],
   properties: {
     id: { type: "string" },
+    requestId: { type: "string" },
+    revision: { type: "number" },
+    parentRecipeId: { type: "string" },
     timestamp: { type: "string" },
     viewId: { type: "string" },
     viewVersion: { type: "string" },
+    viewWeights: { type: "object" },
+    plannerVersion: { type: "string" },
+    contextPlanId: { type: "string" },
+    runtimePolicy: {
+      type: "object",
+      required: ["temperature", "allowTools", "allowRag", "allowMemoryWrite", "kvPolicy"],
+      properties: {
+        temperature: { type: "number" },
+        allowTools: { type: "boolean" },
+        allowRag: { type: "boolean" },
+        allowMemoryWrite: { type: "boolean" },
+        kvPolicy: { type: "string" }
+      }
+    },
     selectedContext: {
       type: "object",
       required: ["anchors", "stream", "islands", "memory", "rag"],
@@ -256,6 +363,14 @@ export function assertValidRecipe(candidate: unknown): Recipe {
     throw new Error(`Recipe schema validation failed: ${result.errors.join("; ")}`);
   }
   return candidate as Recipe;
+}
+
+export function assertValidContextPlan(candidate: unknown): ContextPlan {
+  const result = validateAgainstSchema(contextPlanSchema, candidate);
+  if (!result.valid) {
+    throw new Error(`ContextPlan schema validation failed: ${result.errors.join("; ")}`);
+  }
+  return candidate as ContextPlan;
 }
 
 export function assertValidContextItem(candidate: unknown): ContextItem {

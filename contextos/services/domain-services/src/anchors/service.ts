@@ -5,8 +5,12 @@ import { estimateTokens } from "../../../../packages/utils/src/token.js";
 export class AnchorsService {
   constructor(private readonly rootDir: string) {}
 
+  async listAnchorRecords(): Promise<Anchor[]> {
+    return (await readStore(this.rootDir, "anchors")) as Anchor[];
+  }
+
   async listAnchors(): Promise<ContextItem[]> {
-    const anchors = (await readStore(this.rootDir, "anchors")) as Anchor[];
+    const anchors = await this.listAnchorRecords();
     return anchors.map((anchor) => ({
       id: anchor.id,
       type: "anchor",
