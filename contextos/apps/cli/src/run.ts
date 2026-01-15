@@ -24,6 +24,7 @@ import type { StrategyKey } from "../../../packages/shared-types/src/strategyMet
 import { GovernanceAnalyzer } from "../../../services/governance/governanceAnalyzer.js";
 import { GovernancePolicyService } from "../../../services/governance/governancePolicy.js";
 import { ExperimentService } from "../../../services/experiments/experimentService.js";
+import { ExperimentRunner } from "../../../services/experiments/experimentRunner.js";
 import type { StrategyVariant } from "../../../packages/shared-types/src/comparison.js";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -53,6 +54,12 @@ const parseArgs = (input: string[]) => {
     maxRollbacks?: number;
     restrictedScopes?: string;
     experimentOnlyScopes?: string;
+    mode?: string;
+    planner?: string;
+    includeIslandsSpec?: string;
+    excludeIslandsSpec?: string;
+    includeAnchorsSpec?: string;
+    excludeAnchorsSpec?: string;
   } = { excludeIslands: [] };
   for (let i = 0; i < input.length; i += 1) {
     const arg = input[i];
@@ -100,6 +107,36 @@ const parseArgs = (input: string[]) => {
     }
     if (arg === "--confirm") {
       options.confirm = true;
+    }
+    if (arg === "--mode") {
+      options.mode = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--planner") {
+      options.planner = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--include-islands") {
+      options.includeIslandsSpec = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--exclude-islands") {
+      options.excludeIslandsSpec = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--include-anchors") {
+      options.includeAnchorsSpec = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--exclude-anchors") {
+      options.excludeAnchorsSpec = input[i + 1];
+      i += 1;
+      continue;
     }
     if (arg === "--max-rollbacks") {
       const parsed = Number(input[i + 1]);
@@ -413,25 +450,111 @@ if (command === "experiment") {
   const subcommand = args[1];
   const options = parseArgs(args);
   const experimentService = new ExperimentService(rootDir);
-  if (subcommand === "create") {
-    if (!options.description || !options.views || !options.isolation) {
-      throw new Error("Usage: experiment create --description \"...\" --views viewA,viewB --isolation sandbox");
+  const experimentRunner = new ExperimentRunner(rootDir, experimentService);
+  if (subcommand === "spec") {
+    const action = args[2];
+    if (action === "create") {
+      if (!options.message || !options.mode || !options.views || !options.planner) {
+        throw new Error(
+          "Usage: experiment spec create --message \"...\" --mode multi_view --views debug@v1,plan@v1 --planner a,b"
+        );
+      }
+      const snapshot = await experimentRunner.createCandidatePoolSnapshot();
+      const views = options.views.split(",").map((entry) => {
+        const [viewId, version] = entry.trim().split("@");
+        if (!viewId || !version) {
+          throw new Error("Views must be formatted as viewId@version.");
+        }
+        return { viewId, version };
+      });
+      const spec = await experimentService.createSpec({
+        message: options.message,
+        candidatePoolSnapshotRef: snapshot.snapshotId,
+        compositionMode: options.mode as "multi_view" | "view_blend" | "context_paint",
+        views,
+        plannerVariants: options.planner.split(",").map((entry) => entry.trim()),
+        contextOverrides: {
+          includeIslands: options.includeIslandsSpec?.split(",").map((entry) => entry.trim()),
+          excludeIslands: options.excludeIslandsSpec?.split(",").map((entry) => entry.trim()),
+          includeAnchors: options.includeAnchorsSpec?.split(",").map((entry) => entry.trim()),
+          excludeAnchors: options.excludeAnchorsSpec?.split(",").map((entry) => entry.trim())
+        },
+        isolationLevel: "sandbox",
+        forbidWriteback: true
+      });
+      await writeJsonFile(`${rootDir}/data/experiments/spec-${spec.specId}.json`, spec);
+      console.log("Experiment Spec Created");
+      console.log(`- specId: ${spec.specId}`);
+      console.log(`- candidatePool: ${snapshot.snapshotId}`);
+      process.exit(0);
     }
-    const experiment = await experimentService.createExperiment({
-      description: options.description,
-      involvedViews: options.views.split(",").map((view) => view.trim()),
-      isolationLevel: options.isolation as "sandbox" | "shadow" | "report-only"
-    });
-    console.log("Experiment Created");
-    console.log(`- id: ${experiment.experimentId}`);
+    throw new Error("Usage: experiment spec create --message \"...\" --mode multi_view --views view@v1 --planner a,b");
+  }
+  if (subcommand === "run") {
+    const specIndex = args.findIndex((arg) => arg === "--spec");
+    const specId = specIndex >= 0 ? args[specIndex + 1] : args[2];
+    if (!specId) {
+      throw new Error("Usage: experiment run --spec <spec_id>");
+    }
+    const spec = await experimentService.getSpec(specId);
+    if (!spec) {
+      throw new Error("Experiment spec not found.");
+    }
+    const result = await experimentRunner.run(spec);
+    console.log("Experiment Run Summary");
+    console.log(`- experimentId: ${result.experimentId}`);
+    console.log(`- runs: ${result.runs.length}`);
     process.exit(0);
   }
-  if (subcommand === "list") {
-    const runs = await experimentService.listExperiments();
-    console.log(JSON.stringify(runs, null, 2));
+  if (subcommand === "export") {
+    const idIndex = args.findIndex((arg) => arg === "--id");
+    const experimentId = idIndex >= 0 ? args[idIndex + 1] : args[2];
+    const formatIndex = args.findIndex((arg) => arg === "--format");
+    const format = formatIndex >= 0 ? args[formatIndex + 1] : "canvas";
+    if (!experimentId) {
+      throw new Error("Usage: experiment export --id <experiment_id> --format canvas");
+    }
+    if (format !== "canvas") {
+      throw new Error("Only canvas export is supported.");
+    }
+    const bundle = await experimentService.getCanvasBundle(experimentId);
+    if (!bundle) {
+      throw new Error("Canvas bundle not found.");
+    }
+    const outputPath = `${rootDir}/data/experiments/canvas-export-${experimentId}.json`;
+    await writeJsonFile(outputPath, bundle);
+    console.log("Experiment Exported");
+    console.log(`- path: ${outputPath}`);
     process.exit(0);
   }
-  throw new Error("Usage: experiment <create|list>");
+  if (subcommand === "show") {
+    const idIndex = args.findIndex((arg) => arg === "--id");
+    const experimentId = idIndex >= 0 ? args[idIndex + 1] : args[2];
+    if (!experimentId) {
+      throw new Error("Usage: experiment show --id <experiment_id>");
+    }
+    const bundle = await experimentService.getCanvasBundle(experimentId);
+    const runs = await experimentService.listCompositionRuns(experimentId);
+    console.log(
+      JSON.stringify(
+        {
+          experimentId,
+          runs: runs.map((run) => ({
+            runId: run.runId,
+            variantId: run.variantId,
+            planRef: run.planRef,
+            diffRef: run.diffRef,
+            driftRef: run.driftRef
+          })),
+          bundleRef: bundle ? `canvas:${bundle.bundleId}` : null
+        },
+        null,
+        2
+      )
+    );
+    process.exit(0);
+  }
+  throw new Error("Usage: experiment <spec|run|export|show>");
 }
 
 if (command === "timeline") {

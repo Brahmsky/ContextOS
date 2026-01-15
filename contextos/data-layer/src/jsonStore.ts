@@ -24,7 +24,15 @@ export type StoreFile =
   | "governance_reports"
   | "governance_violations"
   | "experiments"
-  | "experiment_reports";
+  | "experiment_reports"
+  | "experiment_specs"
+  | "candidate_pool_snapshots"
+  | "composition_runs"
+  | "experiment_plans"
+  | "experiment_diffs"
+  | "experiment_drifts"
+  | "experiment_timelines"
+  | "canvas_bundles";
 
 const storePath = (rootDir: string, name: StoreFile) => `${rootDir}/data/${name}/${name}.json`;
 
