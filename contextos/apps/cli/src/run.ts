@@ -17,6 +17,7 @@ import type { StrategyVariant } from "../../../packages/shared-types/src/compari
 import { readStoreById } from "../../../data-layer/src/jsonStore.js";
 import { runRegression } from "../../../services/logic-engine/regression/regressionRunner.js";
 import { hashJson } from "../../../packages/utils/src/hash.js";
+import { OfflineAnalyzer } from "../../../services/analysis/offlineAnalyzer.js";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -190,6 +191,30 @@ if (command === "regress") {
   console.log(`- reasons: ${report.reasons.join("; ") || "none"}`);
   process.exit(0);
 }
+
+if (command === "recommend") {
+  const options = parseArgs(args);
+  const analyzer = new OfflineAnalyzer(rootDir);
+  if (options.view) {
+    const report = await analyzer.recommend({ scope: "view", viewId: options.view, limit: 3 });
+    await writeJsonFile(`${rootDir}/data/recommendation_reports/recommend-${options.view}.json`, report);
+    await appendStore(rootDir, "recommendation_reports", report);
+    console.log("Recommendation Summary");
+    console.log(`- scope: view:${options.view}`);
+    console.log(`- recommended: ${report.recommendedStrategies.length}`);
+    console.log(`- rejected: ${report.rejectedStrategies.length}`);
+    process.exit(0);
+  }
+  const report = await analyzer.recommend({ scope: "global", limit: 3 });
+  await writeJsonFile(`${rootDir}/data/recommendation_reports/recommend-global.json`, report);
+  await appendStore(rootDir, "recommendation_reports", report);
+  console.log("Recommendation Summary");
+  console.log("- scope: global");
+  console.log(`- recommended: ${report.recommendedStrategies.length}`);
+  console.log(`- rejected: ${report.rejectedStrategies.length}`);
+  process.exit(0);
+}
+
 if (command === "timeline") {
   const recipeId = args[1];
   if (!recipeId) {

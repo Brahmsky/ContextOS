@@ -6,3 +6,5 @@ export * from "./drift.js";
 export * from "./comparison.js";
 export * from "./invariants.js";
 export * from "./regression.js";
+export * from "./strategyMetrics.js";
+export * from "./recommendations.js";
