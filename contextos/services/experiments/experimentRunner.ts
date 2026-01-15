@@ -9,7 +9,7 @@ import type {
 import type { ContextPlan, Recipe, ViewDefinition } from "../../packages/shared-types/src/types.js";
 import { diffRecipes } from "../../packages/shared-types/src/diff.js";
 import { detectDrift } from "../logic-engine/drift/driftDetector.js";
-import { hashJson } from "../../packages/utils/src/hash.js";
+import { hashPlan, hashPromptMessages } from "../../packages/utils/src/hash.js";
 import { ContextPlanner } from "../logic-engine/src/planner/contextPlanner.js";
 import { AnchorsService } from "../domain-services/src/anchors/service.js";
 import { IslandsService } from "../domain-services/src/islands/service.js";
@@ -237,8 +237,8 @@ export class ExperimentRunner {
           specId: spec.specId,
           variantId: buildVariantId(variant.label, plannerVariant),
           planRef,
-          promptHash: hashJson({ message: spec.message, viewId: variant.view.id, plannerVariant }),
-          planHash: hashJson(plan),
+          promptHash: hashPromptMessages([{ role: "user", content: spec.message }]),
+          planHash: hashPlan(plan),
           metricsSummary: {
             tokenDistribution,
             anchorRetention,

@@ -1,9 +1,11 @@
 export interface ModelCallAttempt {
-  attempt: number;
+  attemptIndex: number;
   startedAt: string;
   durationMs: number;
   httpStatus?: number;
-  error?: string;
+  retryable: boolean;
+  backoffMs?: number;
+  errorSummary?: string;
 }
 
 export interface ModelCallRecord {
@@ -28,6 +30,7 @@ export interface ModelCallRecord {
   };
   responseHash?: string;
   status: "success" | "error";
+  fatalReason?: "auth" | "billing";
   errorSummary?: string;
   attempts: ModelCallAttempt[];
 }

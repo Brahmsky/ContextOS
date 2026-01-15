@@ -17,7 +17,7 @@ import { MemoryService } from "../../domain-services/src/memory/service.js";
 import { RagService } from "../../domain-services/src/rag/service.js";
 import { RecipesService } from "../../domain-services/src/recipes/service.js";
 import { ContextPlansService } from "../../domain-services/src/contextPlans/service.js";
-import { hashJson } from "../../../packages/utils/src/hash.js";
+import { hashJson, hashPlan, hashPromptMessages } from "../../../packages/utils/src/hash.js";
 import { TurnTimeline } from "./timeline/turnTimeline.js";
 import { runStrategyPlans } from "../../logic-engine/comparison/strategyRunner.js";
 import { buildVariantResult, buildComparisonReport } from "../../logic-engine/comparison/comparisonReport.js";
@@ -294,8 +294,8 @@ export class Orchestrator {
     return {
       assistantMessage: completion.text,
       recipe,
-      planHash: hashJson(plan),
-      promptHash: hashJson(messages),
+      planHash: hashPlan(plan),
+      promptHash: hashPromptMessages(messages),
       driftReport
     };
   }
@@ -392,7 +392,7 @@ export class Orchestrator {
           diagnostics: {
             mode: "compare",
             candidateSnapshotHash: result.plan.inputsSnapshot.candidateHash,
-            expectedPlanHash: hashJson(result.plan)
+            expectedPlanHash: hashPlan(result.plan)
           }
         };
         await this.writeback.apply({ recipe, assistantText: "diagnostic-run", contextPlan: result.plan });

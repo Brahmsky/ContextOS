@@ -5,7 +5,7 @@ import type { InvariantReport } from "../../../packages/shared-types/src/invaria
 import { diffRecipes } from "../../../packages/shared-types/src/diff.js";
 import { detectDrift } from "../drift/driftDetector.js";
 import { checkInvariants } from "../invariants/invariantChecker.js";
-import { hashJson } from "../../../packages/utils/src/hash.js";
+import { hashJson, hashPlan } from "../../../packages/utils/src/hash.js";
 
 export function runRegression(params: {
   baselineRecipe: Recipe;
@@ -15,7 +15,7 @@ export function runRegression(params: {
   profile: RegressionProfile;
   viewLookup: (viewId: string) => ViewDefinition;
 }): { report: RegressionReport; diffId: string; drift: DriftReport; invariantReport: InvariantReport } {
-  const baselinePlanHash = hashJson(params.baselinePlan);
+  const baselinePlanHash = hashPlan(params.baselinePlan);
   const diff = diffRecipes(
     params.baselineRecipe,
     params.candidateRecipe,

@@ -16,7 +16,7 @@ import { appendStore } from "../../../data-layer/src/jsonStore.js";
 import { detectDrift } from "../../../services/logic-engine/drift/driftDetector.js";
 import { readStoreById } from "../../../data-layer/src/jsonStore.js";
 import { runRegression } from "../../../services/logic-engine/regression/regressionRunner.js";
-import { hashJson } from "../../../packages/utils/src/hash.js";
+import { hashJson, hashPlan } from "../../../packages/utils/src/hash.js";
 import { OfflineAnalyzer } from "../../../services/analysis/offlineAnalyzer.js";
 import { AdoptionService } from "../../../services/policy/adoptionService.js";
 import { PolicyApplier } from "../../../services/policy/policyApplier.js";
@@ -304,7 +304,7 @@ if (command === "regress") {
   }
   const profile = {
     baselineRecipeId: baselineRecipe.id,
-    baselinePlanHash: hashJson(baselinePlan),
+    baselinePlanHash: hashPlan(baselinePlan),
     invariantsExpectedPass: [],
     driftThresholds: {
       islandShift: 0.3,

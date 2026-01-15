@@ -1,7 +1,7 @@
 import type { ContextPlan, Recipe, ViewDefinition } from "../../../packages/shared-types/src/types.js";
 import type { InvariantReport, InvariantViolation } from "../../../packages/shared-types/src/invariants.js";
 import { invariantDefinitions } from "./invariantDefinitions.js";
-import { hashJson } from "../../../packages/utils/src/hash.js";
+import { hashPlan } from "../../../packages/utils/src/hash.js";
 
 const severityRank = (severity: "info" | "warn" | "fatal") => {
   if (severity === "fatal") {
@@ -103,7 +103,7 @@ export function checkInvariants(params: {
 
     if (condition.type === "planner_determinism") {
       if (recipe.diagnostics?.expectedPlanHash) {
-        const planHash = hashJson(plan);
+        const planHash = hashPlan(plan);
         if (planHash !== recipe.diagnostics.expectedPlanHash) {
           violations.push({
             invariantId: invariant.id,
