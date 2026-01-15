@@ -8,3 +8,4 @@ export * from "./invariants.js";
 export * from "./regression.js";
 export * from "./strategyMetrics.js";
 export * from "./recommendations.js";
+export * from "./adoption.js";

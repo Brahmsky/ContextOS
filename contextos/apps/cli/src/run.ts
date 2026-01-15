@@ -18,6 +18,10 @@ import { readStoreById } from "../../../data-layer/src/jsonStore.js";
 import { runRegression } from "../../../services/logic-engine/regression/regressionRunner.js";
 import { hashJson } from "../../../packages/utils/src/hash.js";
 import { OfflineAnalyzer } from "../../../services/analysis/offlineAnalyzer.js";
+import { AdoptionService } from "../../../services/policy/adoptionService.js";
+import { PolicyApplier } from "../../../services/policy/policyApplier.js";
+import { RollbackService } from "../../../services/policy/rollbackService.js";
+import type { StrategyKey } from "../../../packages/shared-types/src/strategyMetrics.js";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -70,6 +74,14 @@ const parseArgs = (input: string[]) => {
     }
   }
   return options;
+};
+
+const parseStrategyKey = (value: string): StrategyKey => {
+  const [viewId, plannerVariant, policySignature] = value.split(":");
+  if (!viewId || !plannerVariant || !policySignature) {
+    throw new Error("Strategy key must be formatted as viewId:plannerVariant:policySignature");
+  }
+  return { viewId, plannerVariant, policySignature };
 };
 
 if (command === "replay") {
@@ -212,6 +224,104 @@ if (command === "recommend") {
   console.log("- scope: global");
   console.log(`- recommended: ${report.recommendedStrategies.length}`);
   console.log(`- rejected: ${report.rejectedStrategies.length}`);
+  process.exit(0);
+}
+
+if (command === "adopt") {
+  const recommendationId = args[1];
+  const strategyArg = args[2];
+  const decision = args[3];
+  const rationaleIndex = args.findIndex((arg) => arg === "--rationale");
+  const rationale = rationaleIndex >= 0 ? args[rationaleIndex + 1] ?? "" : "";
+  const actorIndex = args.findIndex((arg) => arg === "--actor");
+  const actor = actorIndex >= 0 ? args[actorIndex + 1] ?? "human" : "human";
+  if (!recommendationId || !strategyArg || !decision) {
+    throw new Error("Usage: adopt <recommendationId> <strategyKey> <accept|reject|defer> --rationale \"...\" [--actor name]");
+  }
+  if (!["accept", "reject", "defer"].includes(decision)) {
+    throw new Error("Decision must be accept, reject, or defer.");
+  }
+  const recommendation = await readStoreById(rootDir, "recommendation_reports", recommendationId);
+  if (!recommendation) {
+    throw new Error("Recommendation not found.");
+  }
+  const strategyKey = parseStrategyKey(strategyArg);
+  const recommended = (recommendation as { recommendedStrategies?: Array<{ strategyKey?: StrategyKey }> })
+    .recommendedStrategies ?? [];
+  const matchesRecommendation = recommended.some(
+    (entry) =>
+      entry.strategyKey?.viewId === strategyKey.viewId &&
+      entry.strategyKey?.plannerVariant === strategyKey.plannerVariant &&
+      entry.strategyKey?.policySignature === strategyKey.policySignature
+  );
+  if (!matchesRecommendation && decision === "accept") {
+    throw new Error("Strategy key not found in recommendation report.");
+  }
+  const applier = new PolicyApplier(rootDir);
+  const adoptionService = new AdoptionService(rootDir);
+  if (!rationale.trim()) {
+    throw new Error("Rationale is required for adoption.");
+  }
+  let appliedChanges: Record<string, unknown> = {};
+  let beforeStateRefs: Record<string, string> = {};
+  let afterStateRefs: Record<string, string> = {};
+  if (decision === "accept") {
+    const result = await applier.applyViewStrategy({
+      adoption: {
+        adoptionId: "",
+        recommendationId,
+        strategyKey,
+        scope: "view",
+        decision: "accept",
+        decidedBy: actor,
+        decidedAt: "",
+        rationale,
+        appliedChanges: {}
+      },
+      strategyKey
+    });
+    appliedChanges = result.appliedChanges;
+    beforeStateRefs = { viewId: strategyKey.viewId, version: result.previousVersion };
+    afterStateRefs = { viewId: strategyKey.viewId, version: result.view.version };
+  }
+  const adoption = await adoptionService.recordAdoption({
+    recommendationId,
+    strategyKey,
+    scope: "view",
+    decision: decision as "accept" | "reject" | "defer",
+    decidedBy: actor,
+    rationale,
+    appliedChanges
+  });
+  await adoptionService.recordTimeline({
+    adoptionId: adoption.adoptionId,
+    recommendationId,
+    beforeStateRefs,
+    afterStateRefs
+  });
+  console.log("Adoption Summary");
+  console.log(`- adoptionId: ${adoption.adoptionId}`);
+  console.log(`- decision: ${adoption.decision}`);
+  process.exit(0);
+}
+
+if (command === "rollback") {
+  const adoptionId = args[1];
+  const rationaleIndex = args.findIndex((arg) => arg === "--rationale");
+  const rationale = rationaleIndex >= 0 ? args[rationaleIndex + 1] ?? "" : "";
+  const actorIndex = args.findIndex((arg) => arg === "--actor");
+  const actor = actorIndex >= 0 ? args[actorIndex + 1] ?? "human" : "human";
+  if (!adoptionId) {
+    throw new Error("Usage: rollback <adoptionId> --rationale \"...\" [--actor name]");
+  }
+  if (!rationale.trim()) {
+    throw new Error("Rationale is required for rollback.");
+  }
+  const rollbackService = new RollbackService(rootDir, new PolicyApplier(rootDir));
+  const rollbackAdoption = await rollbackService.rollback({ adoptionId, decidedBy: actor, rationale });
+  console.log("Rollback Summary");
+  console.log(`- adoptionId: ${rollbackAdoption.adoptionId}`);
+  console.log(`- rollbackOf: ${rollbackAdoption.rollbackRef}`);
   process.exit(0);
 }
 
