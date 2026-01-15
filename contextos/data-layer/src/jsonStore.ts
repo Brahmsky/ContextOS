@@ -10,7 +10,10 @@ export type StoreFile =
   | "recipes"
   | "views"
   | "context_plans"
-  | "recipe_diffs";
+  | "recipe_diffs"
+  | "drift_reports"
+  | "comparison_reports"
+  | "timelines";
 
 const storePath = (rootDir: string, name: StoreFile) => `${rootDir}/data/${name}/${name}.json`;
 
@@ -24,7 +27,7 @@ export async function readStoreById(
   id: string
 ): Promise<JsonRecord | undefined> {
   const records = await readStore(rootDir, name);
-  return records.find((record) => record.id === id || record.planId === id);
+  return records.find((record) => record.id === id || record.planId === id || record.recipeId === id);
 }
 
 export async function writeStore(rootDir: string, name: StoreFile, records: JsonRecord[]): Promise<void> {

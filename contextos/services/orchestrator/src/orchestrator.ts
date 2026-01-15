@@ -18,6 +18,14 @@ import { RagService } from "../../domain-services/src/rag/service.js";
 import { RecipesService } from "../../domain-services/src/recipes/service.js";
 import { ContextPlansService } from "../../domain-services/src/contextPlans/service.js";
 import { hashJson } from "../../../packages/utils/src/hash.js";
+import { TurnTimeline } from "./timeline/turnTimeline.js";
+import { runStrategyPlans } from "../../logic-engine/comparison/strategyRunner.js";
+import { buildVariantResult, buildComparisonReport } from "../../logic-engine/comparison/comparisonReport.js";
+import { diffRecipes } from "../../../packages/shared-types/src/diff.js";
+import { detectDrift } from "../../logic-engine/drift/driftDetector.js";
+import type { ComparisonReport, StrategyVariant } from "../../../packages/shared-types/src/comparison.js";
+import type { DriftReport } from "../../../packages/shared-types/src/drift.js";
+import { appendStore } from "../../../data-layer/src/jsonStore.js";
 import type {
   IContextPlanner,
   IIntentEstimator,
@@ -38,8 +46,13 @@ export class Orchestrator {
   // runtime policy, and recipe generation. See ContextOS 实施架构 2.1 + 3.x.
   async handleTurn(request: TurnRequest): Promise<TurnResponse> {
     const requestId = request.requestId ?? randomUUID();
+    const timeline = new TurnTimeline(this.rootDir, requestId, request.diagnostics?.timeline ?? false);
+    timeline.startStep("load_views");
     const views = await loadViews(this.rootDir);
+    timeline.endStep("load_views", views);
+    timeline.startStep("estimate");
     const estimatorOut = await this.estimator.estimate(request.message, views);
+    timeline.endStep("estimate", estimatorOut);
     const selectedView = this.pickView(views, request.overrides?.viewId ?? estimatorOut.viewId);
     const viewWeights = request.overrides?.weightsOverride ?? selectedView.policy.context.weights;
     const effectiveView: ViewDefinition = {
@@ -59,12 +72,15 @@ export class Orchestrator {
     const memoryService = new MemoryService();
     const ragService = new RagService();
 
+    timeline.startStep("stream_append", request.message);
     await streamService.append({
       role: "user",
       content: request.message,
       timestamp: new Date().toISOString()
     });
+    timeline.endStep("stream_append");
 
+    timeline.startStep("collect_context");
     const anchors = await anchorsService.listAnchors();
     const stableAnchors = await anchorsService.listAnchorRecords();
     const streamRecent = await streamService.recent(6);
@@ -75,6 +91,7 @@ export class Orchestrator {
     const rag = effectiveView.policy.runtime.allowRag
       ? await ragService.retrieve()
       : [];
+    timeline.endStep("collect_context", { anchors, streamRecent, streamMiddle, islands });
 
     const candidates: ContextSelection = {
       anchors,
@@ -84,6 +101,7 @@ export class Orchestrator {
       rag
     };
 
+    timeline.startStep("plan");
     const plan = await this.planner.plan({
       message: request.message,
       view: effectiveView,
@@ -93,7 +111,9 @@ export class Orchestrator {
       window: { streamRecent: 6, streamMiddle: 2 },
       exclusions: { islands: request.overrides?.excludeIslands }
     });
+    timeline.endStep("plan", plan, { planId: plan.planId });
 
+    timeline.startStep("assemble_prompt");
     const messages = buildPrompt({
       view: effectiveView,
       anchors: this.sectionItems(plan, "anchors"),
@@ -103,6 +123,7 @@ export class Orchestrator {
       rag: this.sectionItems(plan, "rag"),
       userMessage: request.message
     });
+    timeline.endStep("assemble_prompt", messages);
 
     const modelPlan: ModelCallPlan = {
       modelId: "mock-llm",
@@ -113,7 +134,9 @@ export class Orchestrator {
       safety: "standard"
     };
 
+    timeline.startStep("llm_call", modelPlan);
     const completion = await this.llmAdapter.execute(modelPlan);
+    timeline.endStep("llm_call", completion);
 
     const recipe: Recipe = {
       id: randomUUID(),
@@ -153,13 +176,18 @@ export class Orchestrator {
     assertValidRecipe(recipe);
     assertValidContextPlan(plan);
 
+    timeline.startStep("stream_append_assistant", completion.text);
     await streamService.append({
       role: "assistant",
       content: completion.text,
       timestamp: new Date().toISOString()
     });
+    timeline.endStep("stream_append_assistant");
 
+    timeline.startStep("writeback", recipe);
     await this.writeback.apply({ recipe, assistantText: completion.text, contextPlan: plan });
+    timeline.endStep("writeback", { recipeId: recipe.id, planId: plan.planId });
+    await timeline.persist({ recipeId: recipe.id, planId: plan.planId });
 
     this.printRecipeSummary(recipe, plan, completion.text);
 
@@ -175,6 +203,7 @@ export class Orchestrator {
     recipe: Recipe;
     planHash: string;
     promptHash: string;
+    driftReport: DriftReport;
   }> {
     const recipesService = new RecipesService(this.rootDir);
     const contextPlansService = new ContextPlansService(this.rootDir);
@@ -223,13 +252,150 @@ export class Orchestrator {
     };
 
     const completion = await this.llmAdapter.execute(modelPlan);
+    const driftReport = detectDrift({
+      referenceRecipe: recipe,
+      currentRecipe: recipe,
+      referencePlan: plan,
+      currentPlan: plan
+    });
+    await appendStore(this.rootDir, "drift_reports", driftReport);
 
     return {
       assistantMessage: completion.text,
       recipe,
       planHash: hashJson(plan),
-      promptHash: hashJson(messages)
+      promptHash: hashJson(messages),
+      driftReport
     };
+  }
+
+  async compareStrategies(params: {
+    message: string;
+    variants: StrategyVariant[];
+  }): Promise<ComparisonReport> {
+    const views = await loadViews(this.rootDir);
+    const viewLookup = (id: string) => this.pickView(views, id);
+    const anchorsService = new AnchorsService(this.rootDir);
+    const islandsService = new IslandsService(this.rootDir);
+    const streamService = new StreamService(this.rootDir);
+    const memoryService = new MemoryService();
+    const ragService = new RagService();
+
+    const stableAnchors = await anchorsService.listAnchorRecords();
+    const anchors = await anchorsService.listAnchors();
+    const streamRecent = await streamService.recent(6);
+    const streamMiddle = await streamService.window(2);
+    const islands = await islandsService.selectCandidates(5);
+    const memory = await memoryService.read();
+    const rag = await ragService.retrieve();
+
+    const candidates: ContextSelection = {
+      anchors,
+      stream: [...streamRecent, ...streamMiddle],
+      islands,
+      memory,
+      rag
+    };
+
+    const requestIdBase = randomUUID();
+    const planResults = await runStrategyPlans({
+      message: params.message,
+      variants: params.variants,
+      viewLookup,
+      candidates,
+      planner: this.planner,
+      requestIdBase,
+      stableAnchors,
+      window: { streamRecent: 6, streamMiddle: 2 }
+    });
+
+    const variantResults = await Promise.all(
+      planResults.map(async (result, index) => {
+        const messages = buildPrompt({
+          view: result.view,
+          anchors: this.sectionItems(result.plan, "anchors"),
+          stream: this.sectionItems(result.plan, "stream"),
+          islands: this.sectionItems(result.plan, "islands"),
+          memory: this.sectionItems(result.plan, "memory"),
+          rag: this.sectionItems(result.plan, "rag"),
+          userMessage: params.message
+        });
+        const modelPlan: ModelCallPlan = {
+          modelId: "mock-llm",
+          temperature: result.view.policy.runtime.temperature,
+          messages,
+          tools: result.view.policy.runtime.allowTools ? ["mock-tool"] : [],
+          kvPolicy: result.variant.policyOverrides?.kvPolicy ?? "default",
+          safety: "standard"
+        };
+        const recipe: Recipe = {
+          id: randomUUID(),
+          requestId: `${requestIdBase}-${index + 1}`,
+          revision: 1,
+          timestamp: new Date().toISOString(),
+          viewId: result.view.id,
+          viewVersion: result.view.version,
+          viewWeights: result.view.policy.context.weights,
+          plannerVersion: result.plan.plannerVersion,
+          contextPlanId: result.plan.planId,
+          runtimePolicy: {
+            temperature: result.view.policy.runtime.temperature,
+            allowTools: result.view.policy.runtime.allowTools,
+            allowRag: result.view.policy.runtime.allowRag,
+            allowMemoryWrite: result.view.policy.runtime.allowMemoryWrite,
+            kvPolicy: modelPlan.kvPolicy
+          },
+          selectedContext: {
+            anchors: this.sectionItems(result.plan, "anchors"),
+            stream: this.sectionItems(result.plan, "stream"),
+            islands: this.sectionItems(result.plan, "islands"),
+            memory: this.sectionItems(result.plan, "memory"),
+            rag: this.sectionItems(result.plan, "rag")
+          },
+          tokenUsage: {
+            budget: result.plan.tokenReport.budgetTotal,
+            used: result.plan.tokenReport.usedTotal
+          },
+          modelPlan,
+          decisions: { notes: [`variant:${result.variant.plannerVariantId}`] }
+        };
+        await this.writeback.apply({ recipe, assistantText: "diagnostic-run", contextPlan: result.plan });
+        return buildVariantResult({
+          variantId: `${result.variant.plannerVariantId}:${result.variant.viewVariantId}`,
+          recipe,
+          plan: result.plan
+        });
+      })
+    );
+
+    const pairwiseDiffs = [];
+    for (let i = 0; i < variantResults.length; i += 1) {
+      for (let j = i + 1; j < variantResults.length; j += 1) {
+        const left = variantResults[i];
+        const right = variantResults[j];
+        const diff = diffRecipes(left.recipe, right.recipe, left.plan, right.plan);
+        const drift = detectDrift({
+          referenceRecipe: left.recipe,
+          currentRecipe: right.recipe,
+          referencePlan: left.plan,
+          currentPlan: right.plan
+        });
+        const diffRecord = await appendStore(this.rootDir, "recipe_diffs", diff);
+        const driftRecord = await appendStore(this.rootDir, "drift_reports", drift);
+        pairwiseDiffs.push({
+          fromVariant: left.variantId,
+          toVariant: right.variantId,
+          recipeDiffId: String(diffRecord.id),
+          driftReportId: String(driftRecord.id)
+        });
+      }
+    }
+
+    return buildComparisonReport({
+      inputHash: hashJson({ message: params.message, candidates }),
+      variants: variantResults,
+      pairwiseDiffs
+    });
   }
 
   private pickView(views: ViewDefinition[], viewId: string): ViewDefinition {

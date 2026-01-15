@@ -7,9 +7,13 @@ import { ContextPlanner } from "../../../services/logic-engine/src/planner/conte
 import { WritebackController } from "../../../services/logic-engine/src/writeback/writebackController.js";
 import { MockLLMAdapter } from "../../../adapters/llm/mockAdapter.js";
 import { ContextPlansService } from "../../../services/domain-services/src/contextPlans/service.js";
+import { RecipesService } from "../../../services/domain-services/src/recipes/service.js";
 import { diffRecipes } from "../../../packages/shared-types/src/diff.js";
 import { writeJsonFile } from "../../../packages/utils/src/files.js";
 import { appendStore } from "../../../data-layer/src/jsonStore.js";
+import { detectDrift } from "../../../services/logic-engine/drift/driftDetector.js";
+import type { StrategyVariant } from "../../../packages/shared-types/src/comparison.js";
+import { readStoreById } from "../../../data-layer/src/jsonStore.js";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -29,6 +33,8 @@ const parseArgs = (input: string[]) => {
     message?: string;
     view?: string;
     excludeIslands: string[];
+    timeline?: boolean;
+    variants?: string;
   } = { excludeIslands: [] };
   for (let i = 0; i < input.length; i += 1) {
     const arg = input[i];
@@ -47,6 +53,15 @@ const parseArgs = (input: string[]) => {
       if (value) {
         options.excludeIslands.push(value);
       }
+      i += 1;
+      continue;
+    }
+    if (arg === "--timeline") {
+      options.timeline = true;
+      continue;
+    }
+    if (arg === "--variants") {
+      options.variants = input[i + 1];
       i += 1;
     }
   }
@@ -72,6 +87,79 @@ if (command === "replay") {
   process.exit(0);
 }
 
+if (command === "drift") {
+  const fromId = args[1];
+  const toId = args[2];
+  if (!fromId || !toId) {
+    throw new Error("Usage: drift <fromRecipeId> <toRecipeId>");
+  }
+  const recipesService = new RecipesService(rootDir);
+  const plansService = new ContextPlansService(rootDir);
+  const fromRecipe = await recipesService.findById(fromId);
+  const toRecipe = await recipesService.findById(toId);
+  if (!fromRecipe || !toRecipe) {
+    throw new Error("Missing recipe(s) for drift.");
+  }
+  const fromPlan = await plansService.findById(fromRecipe.contextPlanId);
+  const toPlan = await plansService.findById(toRecipe.contextPlanId);
+  if (!fromPlan || !toPlan) {
+    throw new Error("Missing plan(s) for drift.");
+  }
+  const driftReport = detectDrift({
+    referenceRecipe: fromRecipe,
+    currentRecipe: toRecipe,
+    referencePlan: fromPlan,
+    currentPlan: toPlan
+  });
+  await writeJsonFile(`${rootDir}/data/drift_reports/drift-${toRecipe.id}.json`, driftReport);
+  await appendStore(rootDir, "drift_reports", driftReport);
+  console.log("Drift Summary");
+  console.log(`- signals: ${driftReport.driftSignals.length}`);
+  console.log(`- suspected layers: ${driftReport.suspectedLayers.join(", ") || "none"}`);
+  process.exit(0);
+}
+
+if (command === "compare") {
+  const options = parseArgs(args);
+  if (!options.message || !options.variants) {
+    throw new Error("Usage: compare --message \"...\" --variants viewA,viewB");
+  }
+  const variants: StrategyVariant[] = options.variants.split(",").map((viewId) => ({
+    plannerVariantId: "v1",
+    viewVariantId: viewId.trim(),
+    description: `compare:${viewId.trim()}`
+  }));
+  const report = await orchestrator.compareStrategies({
+    message: options.message,
+    variants
+  });
+  await writeJsonFile(`${rootDir}/data/comparison_reports/comparison-${randomUUID()}.json`, report);
+  await appendStore(rootDir, "comparison_reports", report);
+  console.log("Comparison Summary");
+  console.log(`- variants: ${report.variants.length}`);
+  console.log(`- pairwise: ${report.pairwiseDiffs.length}`);
+  process.exit(0);
+}
+
+if (command === "timeline") {
+  const recipeId = args[1];
+  if (!recipeId) {
+    throw new Error("Usage: timeline <recipeId>");
+  }
+  const timeline = await readStoreById(rootDir, "timelines", recipeId);
+  if (!timeline) {
+    throw new Error("Timeline not found.");
+  }
+  console.log("Timeline Summary");
+  const steps = (timeline as { steps?: Array<{ stepName: string; startTs: number; endTs: number }> }).steps ?? [];
+  steps.forEach((step) => {
+    const duration = step.endTs - step.startTs;
+    console.log(`- ${step.stepName}: ${duration}ms`);
+  });
+  await writeJsonFile(`${rootDir}/data/timelines/timeline-${recipeId}.json`, timeline);
+  process.exit(0);
+}
+
 const options = parseArgs(args);
 const message = options.message ?? "Hello ContextOS";
 const requestId = randomUUID();
@@ -81,7 +169,8 @@ const baseResponse = await orchestrator.handleTurn({
   threadId: "demo",
   message,
   requestId,
-  revision: 1
+  revision: 1,
+  diagnostics: { timeline: options.timeline }
 });
 
 if (options.view || options.excludeIslands.length > 0) {

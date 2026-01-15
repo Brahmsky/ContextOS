@@ -12,6 +12,9 @@ export type TurnRequest = {
     excludeIslands?: string[];
     weightsOverride?: Record<string, number>;
   };
+  diagnostics?: {
+    timeline?: boolean;
+  };
 };
 
 export type TurnResponse = {
