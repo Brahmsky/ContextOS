@@ -26,6 +26,14 @@ export const viewDefinitionSchema: JsonSchema = {
     label: { type: "string" },
     description: { type: "string" },
     prompt: { type: "string" },
+    freeze: {
+      type: "object",
+      properties: {
+        planner: { type: "boolean" },
+        contextSources: { type: "array", items: { type: "string" } },
+        runtime: { type: "array", items: { type: "string" } }
+      }
+    },
     policy: {
       type: "object",
       required: ["context", "runtime"],
@@ -159,7 +167,8 @@ export const contextPlanSchema: JsonSchema = {
         candidateCounts: { type: "object" },
         weights: { type: "object" },
         window: { type: "object" },
-        thresholds: { type: "object" }
+        thresholds: { type: "object" },
+        candidateHash: { type: "string" }
       }
     }
   },
@@ -269,6 +278,15 @@ export const recipeSchema: JsonSchema = {
       required: ["notes"],
       properties: {
         notes: { type: "array", items: { type: "string" } }
+      }
+    },
+    diagnostics: {
+      type: "object",
+      properties: {
+        mode: { type: "string" },
+        candidateSnapshotHash: { type: "string" },
+        expectedPlanHash: { type: "string" },
+        overrideDenied: { type: "array", items: { type: "string" } }
       }
     }
   },

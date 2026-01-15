@@ -6,6 +6,11 @@
       "label": "Debug",
       "description": "Focused debugging mode with strict constraints.",
       "prompt": "You are in debug mode. Provide precise, step-by-step diagnostics and fixes.",
+      "freeze": {
+        "planner": true,
+        "contextSources": ["anchors", "islands"],
+        "runtime": ["rag"]
+      },
       "policy": {
         "context": {
           "maxTokens": 1200,
@@ -81,6 +86,11 @@
       "label": "Plan",
       "description": "Execution planning and milestone breakdown.",
       "prompt": "You are in planning mode. Provide structured plans with milestones and dependencies.",
+      "freeze": {
+        "planner": true,
+        "contextSources": ["anchors", "islands"],
+        "runtime": ["rag"]
+      },
       "policy": {
         "context": {
           "maxTokens": 1300,

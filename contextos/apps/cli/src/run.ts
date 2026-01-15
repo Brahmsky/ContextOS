@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { Orchestrator } from "../../../services/orchestrator/src/orchestrator.js";
+import { loadViews } from "../../../services/orchestrator/src/viewLoader.js";
 import { IntentEstimator } from "../../../services/logic-engine/src/estimator/intentEstimator.js";
 import { ContextPlanner } from "../../../services/logic-engine/src/planner/contextPlanner.js";
 import { WritebackController } from "../../../services/logic-engine/src/writeback/writebackController.js";
@@ -14,6 +15,8 @@ import { appendStore } from "../../../data-layer/src/jsonStore.js";
 import { detectDrift } from "../../../services/logic-engine/drift/driftDetector.js";
 import type { StrategyVariant } from "../../../packages/shared-types/src/comparison.js";
 import { readStoreById } from "../../../data-layer/src/jsonStore.js";
+import { runRegression } from "../../../services/logic-engine/regression/regressionRunner.js";
+import { hashJson } from "../../../packages/utils/src/hash.js";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -141,6 +144,52 @@ if (command === "compare") {
   process.exit(0);
 }
 
+if (command === "regress") {
+  const baselineId = args[1];
+  const candidateId = args[2];
+  if (!baselineId || !candidateId) {
+    throw new Error("Usage: regress <baselineRecipeId> <candidateRecipeId>");
+  }
+  const recipesService = new RecipesService(rootDir);
+  const plansService = new ContextPlansService(rootDir);
+  const baselineRecipe = await recipesService.findById(baselineId);
+  const candidateRecipe = await recipesService.findById(candidateId);
+  if (!baselineRecipe || !candidateRecipe) {
+    throw new Error("Missing recipe(s) for regression.");
+  }
+  const baselinePlan = await plansService.findById(baselineRecipe.contextPlanId);
+  const candidatePlan = await plansService.findById(candidateRecipe.contextPlanId);
+  if (!baselinePlan || !candidatePlan) {
+    throw new Error("Missing plan(s) for regression.");
+  }
+  const profile = {
+    baselineRecipeId: baselineRecipe.id,
+    baselinePlanHash: hashJson(baselinePlan),
+    invariantsExpectedPass: [],
+    driftThresholds: {
+      islandShift: 0.3,
+      tokenDistributionShift: 0.2,
+      anchorLoss: 0.2
+    },
+    description: "default regression profile"
+  };
+  const views = await loadViews(rootDir);
+  const viewLookup = (viewId: string) => views.find((view) => view.id === viewId) ?? views[0];
+  const { report } = runRegression({
+    baselineRecipe,
+    candidateRecipe,
+    baselinePlan,
+    candidatePlan,
+    profile,
+    viewLookup
+  });
+  await writeJsonFile(`${rootDir}/data/regression_reports/regression-${candidateRecipe.id}.json`, report);
+  await appendStore(rootDir, "regression_reports", report);
+  console.log("Regression Summary");
+  console.log(`- pass: ${report.pass}`);
+  console.log(`- reasons: ${report.reasons.join("; ") || "none"}`);
+  process.exit(0);
+}
 if (command === "timeline") {
   const recipeId = args[1];
   if (!recipeId) {

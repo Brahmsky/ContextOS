@@ -13,7 +13,9 @@ export type StoreFile =
   | "recipe_diffs"
   | "drift_reports"
   | "comparison_reports"
-  | "timelines";
+  | "timelines"
+  | "invariant_reports"
+  | "regression_reports";
 
 const storePath = (rootDir: string, name: StoreFile) => `${rootDir}/data/${name}/${name}.json`;
 

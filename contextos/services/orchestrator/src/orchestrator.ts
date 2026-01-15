@@ -26,6 +26,8 @@ import { detectDrift } from "../../logic-engine/drift/driftDetector.js";
 import type { ComparisonReport, StrategyVariant } from "../../../packages/shared-types/src/comparison.js";
 import type { DriftReport } from "../../../packages/shared-types/src/drift.js";
 import { appendStore } from "../../../data-layer/src/jsonStore.js";
+import { checkInvariants } from "../../logic-engine/invariants/invariantChecker.js";
+import { writeJsonFile } from "../../../packages/utils/src/files.js";
 import type {
   IContextPlanner,
   IIntentEstimator,
@@ -54,7 +56,21 @@ export class Orchestrator {
     const estimatorOut = await this.estimator.estimate(request.message, views);
     timeline.endStep("estimate", estimatorOut);
     const selectedView = this.pickView(views, request.overrides?.viewId ?? estimatorOut.viewId);
-    const viewWeights = request.overrides?.weightsOverride ?? selectedView.policy.context.weights;
+    const overrideDenied: string[] = [];
+    const freeze = selectedView.freeze ?? {};
+    let viewWeights = selectedView.policy.context.weights;
+    if (request.overrides?.weightsOverride) {
+      if (freeze.planner) {
+        overrideDenied.push("weights_override_denied:freeze");
+      } else {
+        viewWeights = request.overrides.weightsOverride;
+      }
+    }
+    const excludedIslands =
+      freeze.contextSources?.includes("islands") ? [] : request.overrides?.excludeIslands ?? [];
+    if (request.overrides?.excludeIslands?.length && freeze.contextSources?.includes("islands")) {
+      overrideDenied.push("exclude_islands_denied:freeze");
+    }
     const effectiveView: ViewDefinition = {
       ...selectedView,
       policy: {
@@ -109,7 +125,7 @@ export class Orchestrator {
       requestId,
       stableAnchors,
       window: { streamRecent: 6, streamMiddle: 2 },
-      exclusions: { islands: request.overrides?.excludeIslands }
+      exclusions: { islands: excludedIslands }
     });
     timeline.endStep("plan", plan, { planId: plan.planId });
 
@@ -170,6 +186,11 @@ export class Orchestrator {
       modelPlan,
       decisions: {
         notes: [...estimatorOut.notes]
+      },
+      diagnostics: {
+        mode: "normal",
+        candidateSnapshotHash: plan.inputsSnapshot.candidateHash,
+        overrideDenied: overrideDenied.length ? overrideDenied : undefined
       }
     };
 
@@ -188,6 +209,16 @@ export class Orchestrator {
     await this.writeback.apply({ recipe, assistantText: completion.text, contextPlan: plan });
     timeline.endStep("writeback", { recipeId: recipe.id, planId: plan.planId });
     await timeline.persist({ recipeId: recipe.id, planId: plan.planId });
+
+    const invariantReport = checkInvariants({ recipe, plan, view: effectiveView });
+    await appendStore(this.rootDir, "invariant_reports", invariantReport);
+    await writeJsonFile(
+      `${this.rootDir}/data/invariant_reports/invariant-${recipe.id}.json`,
+      invariantReport
+    );
+    if (!invariantReport.pass) {
+      console.warn("Invariant violations detected:", invariantReport.violations);
+    }
 
     this.printRecipeSummary(recipe, plan, completion.text);
 
@@ -357,7 +388,12 @@ export class Orchestrator {
             used: result.plan.tokenReport.usedTotal
           },
           modelPlan,
-          decisions: { notes: [`variant:${result.variant.plannerVariantId}`] }
+          decisions: { notes: [`variant:${result.variant.plannerVariantId}`] },
+          diagnostics: {
+            mode: "compare",
+            candidateSnapshotHash: result.plan.inputsSnapshot.candidateHash,
+            expectedPlanHash: hashJson(result.plan)
+          }
         };
         await this.writeback.apply({ recipe, assistantText: "diagnostic-run", contextPlan: result.plan });
         return buildVariantResult({

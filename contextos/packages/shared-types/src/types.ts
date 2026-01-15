@@ -9,6 +9,11 @@ export interface ViewDefinition {
   label: string;
   description: string;
   prompt: string;
+  freeze?: {
+    planner?: boolean;
+    contextSources?: Array<"anchors" | "stream" | "islands" | "memory" | "rag">;
+    runtime?: Array<"kv" | "rag" | "memory">;
+  };
   policy: {
     context: {
       maxTokens: number;
@@ -91,6 +96,7 @@ export interface ContextPlan {
     weights: Record<string, number>;
     window: { streamRecent: number; streamMiddle: number };
     thresholds: { lowScore: number };
+    candidateHash?: string;
   };
 }
 
@@ -157,6 +163,12 @@ export interface Recipe {
   modelPlan: ModelCallPlan;
   decisions: {
     notes: string[];
+  };
+  diagnostics?: {
+    mode?: "normal" | "replay" | "compare";
+    candidateSnapshotHash?: string;
+    expectedPlanHash?: string;
+    overrideDenied?: string[];
   };
 }
 

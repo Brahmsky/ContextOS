@@ -7,6 +7,7 @@ import type {
   ViewDefinition
 } from "../../../../packages/shared-types/src/types.js";
 import { estimateTokens } from "../../../../packages/utils/src/token.js";
+import { hashJson } from "../../../../packages/utils/src/hash.js";
 import type { IContextPlanner } from "../../../../packages/shared-types/src/contracts.js";
 
 const sortByScore = (items: ContextItem[]) => [...items].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
@@ -198,7 +199,14 @@ export class ContextPlanner implements IContextPlanner {
         },
         weights,
         window,
-        thresholds: { lowScore: LOW_SCORE_THRESHOLD }
+        thresholds: { lowScore: LOW_SCORE_THRESHOLD },
+        candidateHash: hashJson({
+          anchors: candidates.anchors.map((item) => item.id),
+          stream: candidates.stream.map((item) => item.id),
+          islands: candidates.islands.map((item) => item.id),
+          memory: candidates.memory.map((item) => item.id),
+          rag: candidates.rag.map((item) => item.id)
+        })
       }
     };
   }
