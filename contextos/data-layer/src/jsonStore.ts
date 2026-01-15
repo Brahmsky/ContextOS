@@ -32,7 +32,8 @@ export type StoreFile =
   | "experiment_diffs"
   | "experiment_drifts"
   | "experiment_timelines"
-  | "canvas_bundles";
+  | "canvas_bundles"
+  | "experiment_model_calls";
 
 const storePath = (rootDir: string, name: StoreFile) => `${rootDir}/data/${name}/${name}.json`;
 

@@ -7,6 +7,7 @@ import { IntentEstimator } from "../../../services/logic-engine/src/estimator/in
 import { ContextPlanner } from "../../../services/logic-engine/src/planner/contextPlanner.js";
 import { WritebackController } from "../../../services/logic-engine/src/writeback/writebackController.js";
 import { MockLLMAdapter } from "../../../adapters/llm/mockAdapter.js";
+import { DeepSeekAdapter } from "../../../adapters/llm/deepseekAdapter.js";
 import { ContextPlansService } from "../../../services/domain-services/src/contextPlans/service.js";
 import { RecipesService } from "../../../services/domain-services/src/recipes/service.js";
 import { diffRecipes } from "../../../packages/shared-types/src/diff.js";
@@ -26,16 +27,9 @@ import { GovernancePolicyService } from "../../../services/governance/governance
 import { ExperimentService } from "../../../services/experiments/experimentService.js";
 import { ExperimentRunner } from "../../../services/experiments/experimentRunner.js";
 import type { StrategyVariant } from "../../../packages/shared-types/src/comparison.js";
+import { loadEnvConfig } from "../../../packages/utils/src/env.js";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-
-const orchestrator = new Orchestrator(
-  rootDir,
-  new IntentEstimator(),
-  new ContextPlanner(),
-  new MockLLMAdapter(),
-  new WritebackController(rootDir)
-);
 
 const args = process.argv.slice(2);
 const command = args[0] ?? "run";
@@ -51,6 +45,8 @@ const parseArgs = (input: string[]) => {
     views?: string;
     isolation?: string;
     confirm?: boolean;
+    provider?: string;
+    mode?: string;
     maxRollbacks?: number;
     restrictedScopes?: string;
     experimentOnlyScopes?: string;
@@ -108,6 +104,16 @@ const parseArgs = (input: string[]) => {
     if (arg === "--confirm") {
       options.confirm = true;
     }
+    if (arg === "--provider") {
+      options.provider = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--mode") {
+      options.mode = input[i + 1];
+      i += 1;
+      continue;
+    }
     if (arg === "--mode") {
       options.mode = input[i + 1];
       i += 1;
@@ -160,6 +166,41 @@ const parseArgs = (input: string[]) => {
   return options;
 };
 
+const globalOptions = parseArgs(args);
+let orchestratorInstance: Orchestrator | undefined;
+const getOrchestrator = async (): Promise<Orchestrator> => {
+  if (orchestratorInstance) {
+    return orchestratorInstance;
+  }
+  const providerOverride =
+    globalOptions.provider === "mock" || globalOptions.provider === "deepseek"
+      ? globalOptions.provider
+      : undefined;
+  const modeOverride =
+    globalOptions.mode === "experiment" || globalOptions.mode === "main"
+      ? globalOptions.mode
+      : undefined;
+  const envConfig = await loadEnvConfig({
+    rootDir,
+    overrides: {
+      provider: providerOverride,
+      mode: modeOverride
+    }
+  });
+  const adapter =
+    envConfig.provider === "deepseek"
+      ? new DeepSeekAdapter(envConfig, rootDir)
+      : new MockLLMAdapter();
+  orchestratorInstance = new Orchestrator(
+    rootDir,
+    new IntentEstimator(),
+    new ContextPlanner(),
+    adapter,
+    new WritebackController(rootDir)
+  );
+  return orchestratorInstance;
+};
+
 const parseStrategyKey = (value: string): StrategyKey => {
   const [viewId, plannerVariant, policySignature] = value.split(":");
   if (!viewId || !plannerVariant || !policySignature) {
@@ -173,6 +214,7 @@ if (command === "replay") {
   if (!recipeId) {
     throw new Error("Usage: replay <recipeId>");
   }
+  const orchestrator = await getOrchestrator();
   const first = await orchestrator.replayTurn(recipeId);
   const second = await orchestrator.replayTurn(recipeId);
   const consistent = first.planHash === second.planHash && first.promptHash === second.promptHash;
@@ -224,6 +266,7 @@ if (command === "compare") {
   if (!options.message || !options.variants) {
     throw new Error("Usage: compare --message \"...\" --variants viewA,viewB");
   }
+  const orchestrator = await getOrchestrator();
   const variants: StrategyVariant[] = options.variants.split(",").map((viewId) => ({
     plannerVariantId: "v1",
     viewVariantId: viewId.trim(),
@@ -579,6 +622,7 @@ if (command === "timeline") {
 const options = parseArgs(args);
 const message = options.message ?? "Hello ContextOS";
 const requestId = randomUUID();
+const orchestrator = await getOrchestrator();
 
 const baseResponse = await orchestrator.handleTurn({
   userId: "local",
