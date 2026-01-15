@@ -24,7 +24,6 @@ import type { StrategyKey } from "../../../packages/shared-types/src/strategyMet
 import { GovernanceAnalyzer } from "../../../services/governance/governanceAnalyzer.js";
 import { GovernancePolicyService } from "../../../services/governance/governancePolicy.js";
 import { ExperimentService } from "../../../services/experiments/experimentService.js";
-import { ExperimentRunner } from "../../../services/experiments/experimentRunner.js";
 import type { StrategyVariant } from "../../../packages/shared-types/src/comparison.js";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -51,6 +50,9 @@ const parseArgs = (input: string[]) => {
     views?: string;
     isolation?: string;
     confirm?: boolean;
+    maxRollbacks?: number;
+    restrictedScopes?: string;
+    experimentOnlyScopes?: string;
   } = { excludeIslands: [] };
   for (let i = 0; i < input.length; i += 1) {
     const arg = input[i];
@@ -98,6 +100,24 @@ const parseArgs = (input: string[]) => {
     }
     if (arg === "--confirm") {
       options.confirm = true;
+    }
+    if (arg === "--max-rollbacks") {
+      const parsed = Number(input[i + 1]);
+      if (!Number.isNaN(parsed)) {
+        options.maxRollbacks = parsed;
+      }
+      i += 1;
+      continue;
+    }
+    if (arg === "--restricted-scopes") {
+      options.restrictedScopes = input[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg === "--experiment-only-scopes") {
+      options.experimentOnlyScopes = input[i + 1];
+      i += 1;
+      continue;
     }
   }
   return options;
@@ -358,29 +378,35 @@ if (command === "governance") {
   const subcommand = args[1];
   const options = parseArgs(args);
   const policyService = new GovernancePolicyService(rootDir);
-  if (subcommand === "set") {
-    const policy = {
-      maxRollbacksPerWindow: Number(args[2] ?? 3),
-      minRunsBeforeAdoption: Number(args[3] ?? 3),
-      restrictedScopes: ["global"],
-      experimentOnlyScopes: ["planner"]
-    };
-    await policyService.savePolicy(policy);
-    console.log("Governance Policy Saved");
-    process.exit(0);
-  }
   if (subcommand === "report") {
     const analyzer = new GovernanceAnalyzer(rootDir);
-    const strategyMetrics = await new OfflineAnalyzer(rootDir).computeStrategyMetrics();
-    const report = await analyzer.analyze({ timeWindowDays: 30, strategyMetrics });
-    await writeJsonFile(`${rootDir}/data/governance_reports/governance-report.json`, report);
-    await appendStore(rootDir, "governance_reports", report);
+    const report = await analyzer.analyze();
+    await writeJsonFile(`${rootDir}/data/governance_report.json`, report);
     console.log("Governance Report Summary");
-    console.log(`- total adoptions: ${report.adoptionSummary.totalAdoptions}`);
-    console.log(`- rollbacks: ${report.rollbackSummary.totalRollbacks}`);
+    console.log(`- total adoptions: ${report.totalAdoptions}`);
+    console.log(`- rollbacks: ${Math.round(report.rollbackRate * report.totalAdoptions)}`);
     process.exit(0);
   }
-  throw new Error("Usage: governance <report|set>");
+  if (subcommand === "policy") {
+    const action = args[2];
+    if (action === "set") {
+      const policy = {
+        maxRollbacksPerWindow: options.maxRollbacks ?? 3,
+        restrictedScopes: (options.restrictedScopes ?? "global").split(",").map((scope) => scope.trim()),
+        experimentOnlyScopes: (options.experimentOnlyScopes ?? "planner").split(",").map((scope) => scope.trim())
+      };
+      await policyService.savePolicy(policy);
+      console.log("Governance Policy Saved");
+      process.exit(0);
+    }
+    if (action === "show") {
+      const policy = await policyService.loadPolicy();
+      console.log(JSON.stringify(policy, null, 2));
+      process.exit(0);
+    }
+    throw new Error("Usage: governance policy <set|show> [--max-rollbacks N] [--restricted-scopes a,b] [--experiment-only-scopes a,b]");
+  }
+  throw new Error("Usage: governance <report|policy>");
 }
 
 if (command === "experiment") {
@@ -400,51 +426,12 @@ if (command === "experiment") {
     console.log(`- id: ${experiment.experimentId}`);
     process.exit(0);
   }
-  if (subcommand === "run") {
-    const experimentId = args[2];
-    if (!experimentId || !options.message) {
-      throw new Error("Usage: experiment run <experiment_id> --message \"...\"");
-    }
-    const experiment = await experimentService.getExperiment(experimentId);
-    if (!experiment) {
-      throw new Error("Experiment not found.");
-    }
-    const viewsList = experiment.involvedViews;
-    const variants: StrategyVariant[] = viewsList.map((viewId) => ({
-      plannerVariantId: "v1",
-      viewVariantId: viewId,
-      description: `experiment:${experimentId}:${viewId}`
-    }));
-    const runner = new ExperimentRunner(rootDir, new ContextPlanner());
-    const { report, comparison } = await runner.run({
-      experiment,
-      message: options.message,
-      variants
-    });
-    await experimentService.recordReport(report);
-    await writeJsonFile(
-      `${rootDir}/data/experiment_reports/experiment-${experimentId}-comparison.json`,
-      comparison
-    );
-    console.log("Experiment Run Summary");
-    console.log(`- comparisons: ${report.summary.comparisons}`);
+  if (subcommand === "list") {
+    const runs = await experimentService.listExperiments();
+    console.log(JSON.stringify(runs, null, 2));
     process.exit(0);
   }
-  if (subcommand === "report") {
-    const experimentId = args[2];
-    if (!experimentId) {
-      throw new Error("Usage: experiment report <experiment_id>");
-    }
-    const report = await readStoreById(rootDir, "experiment_reports", experimentId);
-    if (!report) {
-      throw new Error("Experiment report not found.");
-    }
-    console.log("Experiment Report Summary");
-    const summary = report as { summary?: { comparisons?: number } };
-    console.log(`- comparisons: ${summary.summary?.comparisons ?? 0}`);
-    process.exit(0);
-  }
-  throw new Error("Usage: experiment <create|run|report>");
+  throw new Error("Usage: experiment <create|list>");
 }
 
 if (command === "timeline") {
